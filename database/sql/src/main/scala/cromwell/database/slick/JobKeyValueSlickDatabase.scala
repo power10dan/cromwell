@@ -26,32 +26,64 @@ trait JobKeyValueSlickDatabase extends JobKeyValueSqlDatabase {
     } else manualUpsertQuery(jobKeyValueEntry)
     runTransaction(action)
   }
-  
+
+  private def printdbg(message: String) = {
+    println(s"FINDME [$connectionDescription] $message")
+  }
+
   private def manualUpsertQuery(jobKeyValueEntry: JobKeyValueEntry)
-                       (implicit ec: ExecutionContext) = for {
-    updateCount <- dataAccess.
-      storeValuesForJobKeyAndStoreKey((
-        jobKeyValueEntry.workflowExecutionUuid,
-        jobKeyValueEntry.callFullyQualifiedName,
-        jobKeyValueEntry.jobIndex,
-        jobKeyValueEntry.jobAttempt,
-        jobKeyValueEntry.storeKey)).
-      update(jobKeyValueEntry.storeValue)
-    _ <- updateCount match {
-      case 0 => dataAccess.jobKeyValueEntryIdsAutoInc += jobKeyValueEntry
-      case _ => assertUpdateCount("addJobKeyValueEntry", updateCount, 1)
-    }
-  } yield ()
+                               (implicit ec: ExecutionContext) = {
+    for {
+      updateCount <- dataAccess.
+        storeValuesForJobKeyAndStoreKey((
+          jobKeyValueEntry.workflowExecutionUuid,
+          jobKeyValueEntry.callFullyQualifiedName,
+          jobKeyValueEntry.jobIndex,
+          jobKeyValueEntry.jobAttempt,
+          jobKeyValueEntry.storeKey)).
+        update(jobKeyValueEntry.storeValue)
+      _ <- updateCount match {
+        case 0 =>
+          val res = dataAccess.jobKeyValueEntryIdsAutoInc += jobKeyValueEntry
+          res.map { x =>
+            printdbg(s"'manual' insert result for $jobKeyValueEntry = $x")
+            x
+          }
+        case _ =>
+          printdbg(s"'manual' update count for $jobKeyValueEntry = $updateCount")
+          assertUpdateCount("addJobKeyValueEntry", updateCount, 1)
+      }
+    } yield ()
+  }
 
   def addJobKeyValueEntries(jobKeyValueEntries: Iterable[JobKeyValueEntry])
                            (implicit ec: ExecutionContext): Future[Unit] = {
+    jobKeyValueEntries.map(_.workflowExecutionUuid).toSeq.distinct.foreach { id =>
+      scala.concurrent.Await.result(runTransaction(dataAccess.jobKeyValueEntriesForWorkflowExecutionUuid(id).result), scala.concurrent.duration.Duration.Inf).foreach { x =>
+        printdbg(s"Row before: $x")
+      }
+    }
+    printdbg(s"useSlickUpserts = $useSlickUpserts")
     val action = if (useSlickUpserts) {
-      val toBeInserted = jobKeyValueEntries.map(dataAccess.jobKeyValueEntryIdsAutoInc.insertOrUpdate)
+      val toBeInserted = jobKeyValueEntries.map { jobKeyValueEntry =>
+        dataAccess.jobKeyValueEntryIdsAutoInc.insertOrUpdate(jobKeyValueEntry).map { x =>
+          printdbg(s"'non-manual' upsert result for $jobKeyValueEntry = $x")
+          x
+        }
+      }
       DBIO.sequence(toBeInserted)
     } else {
       DBIO.sequence(jobKeyValueEntries.map(manualUpsertQuery))
     }
-    runTransaction(action).void
+    runTransaction(action).void.andThen {
+      case result =>
+        printdbg(s"Result = $result")
+        jobKeyValueEntries.map(_.workflowExecutionUuid).toSeq.distinct.foreach { id =>
+          scala.concurrent.Await.result(runTransaction(dataAccess.jobKeyValueEntriesForWorkflowExecutionUuid(id).result), scala.concurrent.duration.Duration.Inf).foreach { x =>
+            printdbg(s"Row after: $x")
+          }
+        }
+    }
   }
 
   override def queryJobKeyValueEntries(workflowExecutionUuid: String)

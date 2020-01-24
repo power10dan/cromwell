@@ -18,7 +18,7 @@ sbt \
     -Dakka.test.timefactor=${CROMWELL_BUILD_UNIT_SPAN_SCALE_FACTOR} \
     -Dbackend.providers.Local.config.filesystems.local.localization.0=copy \
     coverage \
-    test
+    "services/testOnly *KeyValueDatabaseSpec*"
 
 cromwell::build::generate_code_coverage
 
